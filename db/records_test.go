@@ -15,7 +15,7 @@ func TestMarshalUserRecord(t *testing.T) {
 	r.RecordType = organisationGroupMemberRecordName
 	r.OrganisationID = "orgID"
 	r.OrganisationName = "the org name"
-	r.GroupName = "grpname"
+	r.Groups = []string{"grpname"}
 	r.Email = "email"
 	r.FirstName = "fname"
 	r.LastName = "lname"
@@ -26,7 +26,7 @@ func TestMarshalUserRecord(t *testing.T) {
 		t.Fatalf("failed to marshal: %v", err)
 	}
 	actual := string(data)
-	expected := `{"id":"id","rng":"range","typ":"organisationGroupMember","v":0,"organisationId":"orgID","organisationName":"the org name","groupName":"grpname","email":"email","firstName":"fname","lastName":"lname","phone":"12345","createdAt":"2020-01-01T00:00:00Z"}`
+	expected := `{"id":"id","rng":"range","typ":"organisationGroupMember","v":0,"organisationId":"orgID","organisationName":"the org name","groups":["grpname"],"email":"email","firstName":"fname","lastName":"lname","phone":"12345","createdAt":"2020-01-01T00:00:00Z"}`
 
 	if expected != actual {
 		t.Error(cmp.Diff(expected, actual))

@@ -1,12 +1,14 @@
 package db
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
 )
 
 // NewUserStore creates a new UserStore.
@@ -30,6 +32,7 @@ type UserStore struct {
 	Now       func() time.Time
 }
 
+// Put a User.
 func (store UserStore) Put(user User) error {
 	ur := newUserRecord(user)
 	item, err := dynamodbattribute.MarshalMap(ur)
@@ -43,6 +46,7 @@ func (store UserStore) Put(user User) error {
 	return err
 }
 
+// Get a User.
 func (store UserStore) Get(id string) (user User, err error) {
 	gio, err := store.Client.GetItem(&dynamodb.GetItemInput{
 		TableName:      store.TableName,
@@ -56,6 +60,122 @@ func (store UserStore) Get(id string) (user User, err error) {
 	err = dynamodbattribute.UnmarshalMap(gio.Item, &record)
 	user = newUserFromRecord(record)
 	return
+}
+
+// GetDetails gets the full details of a User.
+func (store UserStore) GetDetails(id string) (user UserDetails, err error) {
+	q := expression.Key("id").Equal(expression.Value(newUserRecordHashKey(id)))
+	expr, err := expression.NewBuilder().
+		WithKeyCondition(q).
+		Build()
+	if err != nil {
+		err = fmt.Errorf("userStore.GetDetails: failed to build query: %v", err)
+		return
+	}
+
+	qi := &dynamodb.QueryInput{
+		TableName:                 store.TableName,
+		KeyConditionExpression:    expr.KeyCondition(),
+		ExpressionAttributeValues: expr.Values(),
+		FilterExpression:          expr.Filter(),
+		ExpressionAttributeNames:  expr.Names(),
+		ConsistentRead:            aws.Bool(true),
+	}
+
+	var items []map[string]*dynamodb.AttributeValue
+	page := func(page *dynamodb.QueryOutput, lastPage bool) bool {
+		items = append(items, page.Items...)
+		return true
+	}
+	err = store.Client.QueryPages(qi, page)
+	if err != nil {
+		err = fmt.Errorf("userStore.GetDetails: failed to query pages: %v", err)
+		return
+	}
+
+	user, err = newUserDetailsFromRecords(items)
+	if err != nil {
+		err = fmt.Errorf("userStore.GetDetails: failed to create UserDetails: %w", err)
+	}
+	return
+}
+
+// Invite a User to an Organisation.
+func (store UserStore) Invite(u User, org Organisation, groups []string) error {
+	now := store.Now()
+	organisationGroupMemberRecord := newOrganisationGroupMemberRecord(org, groups, u, now)
+	organisationGroupMemberItem, err := dynamodbattribute.ConvertToMap(organisationGroupMemberRecord)
+	if err != nil {
+		return fmt.Errorf("userStore.Invite: failed to convert organisationGroupMemberRecord: %w", err)
+	}
+	userOrganisationRecord := newUserOrganisationRecord(u, org, now, nil)
+	userOrganisationItem, err := dynamodbattribute.ConvertToMap(userOrganisationRecord)
+	if err != nil {
+		return fmt.Errorf("userStore.Invite: failed to convert userOrganisationRecord: %w", err)
+	}
+	_, err = store.Client.BatchWriteItem(&dynamodb.BatchWriteItemInput{
+		RequestItems: map[string][]*dynamodb.WriteRequest{
+			*store.TableName: {
+				&dynamodb.WriteRequest{
+					PutRequest: &dynamodb.PutRequest{
+						Item: organisationGroupMemberItem,
+					},
+				},
+				&dynamodb.WriteRequest{
+					PutRequest: &dynamodb.PutRequest{
+						Item: userOrganisationItem,
+					},
+				},
+			},
+		},
+	})
+	return err
+}
+
+// AcceptInvite accepts an invitation to join an Organisation.
+func (store UserStore) AcceptInvite(u User, org Organisation) error {
+	update := expression.Set(expression.Name("acceptedAt"), expression.Value(store.Now()))
+
+	expr, err := expression.NewBuilder().
+		WithUpdate(update).
+		Build()
+	if err != nil {
+		return fmt.Errorf("userStore.AcceptInvite: failed to build query: %v", err)
+	}
+
+	_, err = store.Client.UpdateItem(&dynamodb.UpdateItemInput{
+		TableName:                 store.TableName,
+		Key:                       idAndRng(newUserOrganisationRecordHashKey(u.ID), newUserOrganisationRecordRangeKey(org.ID)),
+		UpdateExpression:          expr.Update(),
+		ExpressionAttributeValues: expr.Values(),
+		ExpressionAttributeNames:  expr.Names(),
+	})
+	return err
+}
+
+// RejectInvite rejects an invitation to join an Organisation.
+func (store UserStore) RejectInvite(u User, org Organisation) error {
+	organisationGroupMemberKey := idAndRng(newOrganisationGroupMemberRecordHashKey(org.ID),
+		newOrganisationGroupMemberRecordRangeKey(u.ID))
+	userOrganisationRecordKey := idAndRng(newUserOrganisationRecordHashKey(u.ID),
+		newUserOrganisationRecordRangeKey(org.ID))
+	_, err := store.Client.BatchWriteItem(&dynamodb.BatchWriteItemInput{
+		RequestItems: map[string][]*dynamodb.WriteRequest{
+			*store.TableName: {
+				&dynamodb.WriteRequest{
+					DeleteRequest: &dynamodb.DeleteRequest{
+						Key: organisationGroupMemberKey,
+					},
+				},
+				&dynamodb.WriteRequest{
+					DeleteRequest: &dynamodb.DeleteRequest{
+						Key: userOrganisationRecordKey,
+					},
+				},
+			},
+		},
+	})
+	return err
 }
 
 // user record.
@@ -105,6 +225,20 @@ func newUserOrganisationRecordHashKey(email string) string {
 
 func newUserOrganisationRecordRangeKey(organisationID string) string {
 	return userOrgnisationRecordName + "/" + organisationID
+}
+
+func newUserOrganisationRecord(u User, org Organisation, invitedAt time.Time, acceptedAt *time.Time) userOrganisationRecord {
+	var record userOrganisationRecord
+	record.ID = newUserOrganisationRecordHashKey(u.ID)
+	record.Range = newUserOrganisationRecordRangeKey(org.ID)
+	record.RecordType = userOrgnisationRecordName
+	record.Version = 0
+	record.Email = u.ID
+	record.OrganisationID = org.ID
+	record.OrganisationName = org.Name
+	record.InvitedAt = invitedAt
+	record.AcceptedAt = acceptedAt
+	return record
 }
 
 type userOrganisationRecord struct {
