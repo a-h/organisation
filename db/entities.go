@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/dynamodb"
@@ -15,6 +16,16 @@ func newUserFromRecord(ur userRecord) User {
 		LastName:  ur.LastName,
 		Phone:     ur.Phone,
 		CreatedAt: ur.CreatedAt,
+	}
+}
+
+func newUser(email, first, last, phone string, createdAt time.Time) User {
+	return User{
+		ID:        strings.ToLower(email),
+		FirstName: first,
+		LastName:  last,
+		Phone:     phone,
+		CreatedAt: createdAt,
 	}
 }
 
@@ -92,28 +103,127 @@ func newOrganisation(id, name string) Organisation {
 	return Organisation{ID: id, Name: name}
 }
 
+func newOrganisationFromRecord(or organisationRecord) Organisation {
+	return newOrganisation(or.OrganisationID, or.OrganisationName)
+}
+
 // An Organisation that can be joined.
 type Organisation struct {
 	ID   string
 	Name string
 }
 
+func newOrganisationDetailsFromRecords(items []map[string]*dynamodb.AttributeValue) (org OrganisationDetails, err error) {
+	org.Groups = make(map[GroupName][]User)
+	serviceIDToService := make(map[string]Service)
+	for _, item := range items {
+		recordType, ok := item["typ"]
+		if !ok || recordType.S == nil {
+			continue
+		}
+		switch *recordType.S {
+		case organisationRecordName:
+			var or organisationRecord
+			err = dynamodbattribute.ConvertFromMap(item, &or)
+			if err != nil {
+				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationRecord: %w", err)
+				return
+			}
+			org.ID = or.OrganisationID
+			org.Name = or.OrganisationName
+		case organisationGroupMemberRecordName:
+			// Extract the group name.
+			var ogmr organisationGroupMemberRecord
+			err = dynamodbattribute.ConvertFromMap(item, &ogmr)
+			if err != nil {
+				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationGroupMember: %w", err)
+				return
+			}
+
+			// Extract the user details.
+			var ur userRecord
+			err = dynamodbattribute.ConvertFromMap(item, &ur)
+			if err != nil {
+				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceGroupMemberRecord: %w", err)
+				return
+			}
+
+			// Add the user to the organisation groups.
+			for _, group := range ogmr.Groups {
+				groupName := GroupName(group)
+				org.Groups[groupName] = append(org.Groups[groupName], newUserFromRecord(ur))
+			}
+		case organisationServiceRecordName:
+			var osr organisationServiceRecord
+			err = dynamodbattribute.ConvertFromMap(item, &osr)
+			if err != nil {
+				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceRecord: %w", err)
+				return
+			}
+			service := serviceIDToService[osr.ServiceID]
+			service.ID = osr.ServiceID
+			service.Name = osr.ServiceName
+			serviceIDToService[osr.ServiceID] = service
+		case organisationServiceGroupMemberRecordName:
+			// Extract the service ID and group values.
+			var osgr organisationServiceGroupMemberRecord
+			err = dynamodbattribute.ConvertFromMap(item, &osgr)
+			if err != nil {
+				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceGroupMemberRecord: %w", err)
+				return
+			}
+
+			// Extract the user details.
+			var ur userRecord
+			err = dynamodbattribute.ConvertFromMap(item, &ur)
+			if err != nil {
+				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceGroupMemberRecord: %w", err)
+				return
+			}
+
+			// Add the user to the service's group.
+			service := serviceIDToService[osgr.ServiceID]
+			groupName := GroupName(osgr.Group)
+			if service.Groups == nil {
+				service.Groups = make(map[GroupName][]User)
+			}
+			service.Groups[groupName] = append(service.Groups[groupName], newUserFromRecord(ur))
+			serviceIDToService[osgr.ServiceID] = service
+		}
+	}
+	// Now that all of the records have been read, apply the services to the Organisation.
+	for _, s := range serviceIDToService {
+		s := s
+		org.Services = append(org.Services, s)
+	}
+	return
+}
+
+func newOrganisationDetails(org Organisation, groups map[GroupName][]User, services []Service) OrganisationDetails {
+	return OrganisationDetails{
+		Organisation: org,
+		Groups:       groups,
+		Services:     services,
+	}
+}
+
 // OrganisationDetails provides all the details of an Organisation.
 type OrganisationDetails struct {
 	Organisation
-	Groups   []Group
+	Groups   map[GroupName][]User
 	Services []Service
 }
+
+type GroupName string
 
 // A Service is owned by an Organisation.
 type Service struct {
 	ID     string
 	Name   string
-	Groups []Group
+	Groups map[GroupName][]User
 }
 
-// A Group contains Users.
-type Group struct {
-	Name  string
-	Users []User
-}
+const (
+	GroupOwner  = "owner"
+	GroupMember = "member"
+)

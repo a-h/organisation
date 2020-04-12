@@ -103,7 +103,7 @@ func (store UserStore) GetDetails(id string) (user UserDetails, err error) {
 // Invite a User to an Organisation.
 func (store UserStore) Invite(u User, org Organisation, groups []string) error {
 	now := store.Now()
-	organisationGroupMemberRecord := newOrganisationGroupMemberRecord(org, groups, u, now)
+	organisationGroupMemberRecord := newOrganisationGroupMemberRecord(org, groups, u)
 	organisationGroupMemberItem, err := dynamodbattribute.ConvertToMap(organisationGroupMemberRecord)
 	if err != nil {
 		return fmt.Errorf("userStore.Invite: failed to convert organisationGroupMemberRecord: %w", err)
