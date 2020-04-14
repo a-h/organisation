@@ -16,7 +16,7 @@ type record struct {
 // idAndRng creates a DynamoDB key.
 func idAndRng(id, rng string) map[string]*dynamodb.AttributeValue {
 	return map[string]*dynamodb.AttributeValue{
-		"id":  &dynamodb.AttributeValue{S: aws.String(id)},
-		"rng": &dynamodb.AttributeValue{S: aws.String(rng)},
+		"id":  {S: aws.String(id)},
+		"rng": {S: aws.String(rng)},
 	}
 }

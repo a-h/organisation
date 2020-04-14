@@ -116,6 +116,9 @@ type Organisation struct {
 func newOrganisationDetailsFromRecords(items []map[string]*dynamodb.AttributeValue) (org OrganisationDetails, err error) {
 	org.Groups = make(map[GroupName][]User)
 	serviceIDToService := make(map[string]Service)
+	userIDToUser := make(map[string]User)
+	serviceIDToOrganisationServiceGroupRecords := make(map[string][]organisationServiceGroupRecord)
+
 	for _, item := range items {
 		recordType, ok := item["typ"]
 		if !ok || recordType.S == nil {
@@ -147,11 +150,13 @@ func newOrganisationDetailsFromRecords(items []map[string]*dynamodb.AttributeVal
 				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceGroupMemberRecord: %w", err)
 				return
 			}
+			u := newUserFromRecord(ur)
+			userIDToUser[u.ID] = u
 
 			// Add the user to the organisation groups.
 			for _, group := range ogmr.Groups {
 				groupName := GroupName(group)
-				org.Groups[groupName] = append(org.Groups[groupName], newUserFromRecord(ur))
+				org.Groups[groupName] = append(org.Groups[groupName], u)
 			}
 		case organisationServiceRecordName:
 			var osr organisationServiceRecord
@@ -164,36 +169,34 @@ func newOrganisationDetailsFromRecords(items []map[string]*dynamodb.AttributeVal
 			service.ID = osr.ServiceID
 			service.Name = osr.ServiceName
 			serviceIDToService[osr.ServiceID] = service
-		case organisationServiceGroupMemberRecordName:
+		case organisationServiceGroupRecordName:
 			// Extract the service ID and group values.
-			var osgr organisationServiceGroupMemberRecord
+			var osgr organisationServiceGroupRecord
 			err = dynamodbattribute.ConvertFromMap(item, &osgr)
 			if err != nil {
-				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceGroupMemberRecord: %w", err)
+				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceGroupRecord: %w", err)
 				return
 			}
-
-			// Extract the user details.
-			var ur userRecord
-			err = dynamodbattribute.ConvertFromMap(item, &ur)
-			if err != nil {
-				err = fmt.Errorf("newOrganisationDetailsFromRecords: failed to convert organisationServiceGroupMemberRecord: %w", err)
-				return
-			}
-
-			// Add the user to the service's group.
-			service := serviceIDToService[osgr.ServiceID]
-			groupName := GroupName(osgr.Group)
-			if service.Groups == nil {
-				service.Groups = make(map[GroupName][]User)
-			}
-			service.Groups[groupName] = append(service.Groups[groupName], newUserFromRecord(ur))
-			serviceIDToService[osgr.ServiceID] = service
+			serviceIDToOrganisationServiceGroupRecords[osgr.ServiceID] =
+				append(serviceIDToOrganisationServiceGroupRecords[osgr.ServiceID], osgr)
 		}
 	}
-	// Now that all of the records have been read, apply the services to the Organisation.
-	for _, s := range serviceIDToService {
+	// Now that all of the records have been read, populate the services.
+	for serviceID, s := range serviceIDToService {
 		s := s
+		// Add the users to the service groups.
+		for _, osgr := range serviceIDToOrganisationServiceGroupRecords[serviceID] {
+			groupName := GroupName(osgr.Group)
+			if s.Groups == nil {
+				s.Groups = make(map[GroupName][]User)
+			}
+			for _, userID := range osgr.UserIDs {
+				user, ok := userIDToUser[userID]
+				if ok {
+					s.Groups[groupName] = append(s.Groups[groupName], user)
+				}
+			}
+		}
 		org.Services = append(org.Services, s)
 	}
 	return

@@ -81,9 +81,9 @@ func (store OrganisationStore) Create(owner User, name string) (id string, err e
 
 	_, err = store.Client.TransactWriteItems(&dynamodb.TransactWriteItemsInput{
 		TransactItems: []*dynamodb.TransactWriteItem{
-			&dynamodb.TransactWriteItem{Put: putNewOrganisation},
-			&dynamodb.TransactWriteItem{Put: putOrganisationGroupMember},
-			&dynamodb.TransactWriteItem{Put: putUserOrganisation},
+			{Put: putNewOrganisation},
+			{Put: putOrganisationGroupMember},
+			{Put: putUserOrganisation},
 		},
 	})
 	return
@@ -157,6 +157,38 @@ func (store OrganisationStore) GetDetails(id string) (org OrganisationDetails, e
 	return
 }
 
+// AddUserToOrganisationGroup puts a user into a role within the Organisation. If they already exist, the user is added to the group.
+func (store OrganisationStore) AddUserToOrganisationGroup(organisationID string, user User, group string) error {
+	emptyList := (&dynamodb.AttributeValue{}).SetL([]*dynamodb.AttributeValue{})
+
+	update := expression.
+		Set(expression.Name("typ"), expression.Value(organisationGroupMemberRecordName)).
+		Set(expression.Name("v"), expression.Value(0)).
+		Set(expression.Name("organisationId"), expression.Value(organisationID)).
+		Set(expression.Name("groups"), expression.ListAppend(
+			expression.IfNotExists(expression.Name("groups"), expression.Value(emptyList)),
+			expression.Value([]string{group}))).
+		Set(expression.Name("email"), expression.Value(user.ID)).
+		Set(expression.Name("firstName"), expression.Value(user.FirstName)).
+		Set(expression.Name("lastName"), expression.Value(user.LastName)).
+		Set(expression.Name("phone"), expression.Value(user.Phone)).
+		Set(expression.Name("createdAt"), expression.Value(user.CreatedAt))
+	expr, err := expression.NewBuilder().
+		WithUpdate(update).
+		Build()
+	if err != nil {
+		return err
+	}
+	_, err = store.Client.UpdateItem(&dynamodb.UpdateItemInput{
+		TableName:                 store.TableName,
+		Key:                       idAndRng(newOrganisationGroupMemberRecordHashKey(organisationID), newOrganisationGroupMemberRecordRangeKey(user.ID)),
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		UpdateExpression:          expr.Update(),
+	})
+	return err
+}
+
 // organisation record.
 const organisationRecordName = "organisation"
 
@@ -206,21 +238,24 @@ func newOrganisationGroupMemberRecord(org Organisation, groups []string, u User)
 	record.Range = newOrganisationGroupMemberRecordRangeKey(u.ID)
 	record.RecordType = organisationGroupMemberRecordName
 	record.Version = 0
+
+	record.OrganisationID = org.ID
+
 	record.Groups = groups
+
+	// userRecordFields
 	record.Email = u.ID
 	record.FirstName = u.FirstName
 	record.LastName = u.LastName
 	record.Phone = u.Phone
 	record.CreatedAt = u.CreatedAt
-	record.OrganisationID = org.ID
-	record.OrganisationName = org.Name
 	return record
 }
 
 type organisationGroupMemberRecord struct {
 	record
-	organisationRecordFields
-	Groups []string `json:"groups"`
+	OrganisationID string   `json:"organisationID"`
+	Groups         []string `json:"groups"`
 	userRecordFields
 }
 
@@ -252,7 +287,7 @@ func newOrganisationServiceGroupRecordRangeKey(serviceID, group string) string {
 	return organisationServiceGroupRecordName + "/" + serviceID + "/" + group
 }
 
-type organisationServiceGroupMemberRecord struct {
+type organisationServiceGroupRecord struct {
 	record
 	ServiceID string   `json:"serviceId"`
 	Group     string   `json:"group"`
