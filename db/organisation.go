@@ -57,19 +57,20 @@ func (store OrganisationStore) Create(owner User, name string) (id string, err e
 	}
 
 	// Assign ownership.
-	ogmr := newOrganisationGroupMemberRecord(org, []string{GroupOwner}, owner)
-	ogmrItem, err := dynamodbattribute.MarshalMap(ogmr)
+	var serviceGroups map[string][]string
+	omr := newOrganisationMemberRecord(org, []string{GroupOwner}, serviceGroups, owner)
+	omrItem, err := dynamodbattribute.MarshalMap(omr)
 	if err != nil {
 		return
 	}
 	putOrganisationGroupMember := &dynamodb.Put{
 		TableName: store.TableName,
-		Item:      ogmrItem,
+		Item:      omrItem,
 	}
 
 	// Include the user side of the ownership relationship.
 	userOrganisationRecord := newUserOrganisationRecord(owner, org, now, &now)
-	userOrganisationItem, err := dynamodbattribute.ConvertToMap(userOrganisationRecord)
+	userOrganisationItem, err := dynamodbattribute.MarshalMap(userOrganisationRecord)
 	if err != nil {
 		err = fmt.Errorf("userStore.Invite: failed to convert userOrganisationRecord: %w", err)
 		return
@@ -119,6 +120,38 @@ func (store OrganisationStore) Get(id string) (org Organisation, err error) {
 	return
 }
 
+// CreateService creates a new service.
+func (store OrganisationStore) CreateService(id string, serviceName string) (serviceID string, err error) {
+	serviceID = uuid.New().String()
+	err = store.PutService(id, serviceID, serviceName)
+	return
+}
+
+// PutService creates a new service or updates an existing service's name.
+func (store OrganisationStore) PutService(id string, serviceID, serviceName string) (err error) {
+	organisationServiceRecord := newOrganisationServiceRecord(id, serviceID, serviceName)
+	item, err := dynamodbattribute.MarshalMap(organisationServiceRecord)
+	if err != nil {
+		return
+	}
+	_, err = store.Client.PutItem(&dynamodb.PutItemInput{
+		TableName: store.TableName,
+		Item:      item,
+	})
+	return
+}
+
+// DeleteService deletes a service from the Organisation. It does not remove assignments to the deleted service.
+// These could be removed by a separate process if required.
+func (store OrganisationStore) DeleteService(id, serviceID string) (err error) {
+	key := idAndRng(newOrganisationServiceRecordHashKey(id), newOrganisationServiceRecordRangeKey(serviceID))
+	_, err = store.Client.DeleteItem(&dynamodb.DeleteItemInput{
+		TableName: store.TableName,
+		Key:       key,
+	})
+	return
+}
+
 // GetDetails retrieves all details of an Organisation.
 func (store OrganisationStore) GetDetails(id string) (org OrganisationDetails, err error) {
 	q := expression.Key("id").Equal(expression.Value(newOrganisationRecordHashKey(id)))
@@ -129,7 +162,6 @@ func (store OrganisationStore) GetDetails(id string) (org OrganisationDetails, e
 		err = fmt.Errorf("organisationStore.GetDetails: failed to build query: %v", err)
 		return
 	}
-
 	qi := &dynamodb.QueryInput{
 		TableName:                 store.TableName,
 		KeyConditionExpression:    expr.KeyCondition(),
@@ -157,17 +189,26 @@ func (store OrganisationStore) GetDetails(id string) (org OrganisationDetails, e
 	return
 }
 
-// AddUserToOrganisationGroup puts a user into a role within the Organisation. If they already exist, the user is added to the group.
-func (store OrganisationStore) AddUserToOrganisationGroup(organisationID string, user User, group string) error {
-	emptyList := (&dynamodb.AttributeValue{}).SetL([]*dynamodb.AttributeValue{})
+// AddUserToOrganisationGroups puts a user into groups within the Organisation. If they already exist, the user is added to the group.
+func (store OrganisationStore) AddUserToOrganisationGroups(organisationID string, user User, groups ...string) error {
+	return store.AddUserToGroups(organisationID, user, groups, nil)
+}
 
+// AddUserToServiceGroups puts a user into groups within an Organisation Service.
+func (store OrganisationStore) AddUserToServiceGroups(organisationID string, user User, serviceID string, groups ...string) error {
+	return store.AddUserToGroups(organisationID, user, nil, map[string][]string{
+		serviceID: groups,
+	})
+}
+
+// AddUserToGroups adds a user to Organisation and Service Groups.
+func (store OrganisationStore) AddUserToGroups(organisationID string, user User, groups []string, serviceIDToGroups map[string][]string) error {
+	gs := newGroupSet(groups, serviceIDToGroups)
 	update := expression.
-		Set(expression.Name("typ"), expression.Value(organisationGroupMemberRecordName)).
+		Set(expression.Name("typ"), expression.Value(organisationMemberRecordName)).
 		Set(expression.Name("v"), expression.Value(0)).
 		Set(expression.Name("organisationId"), expression.Value(organisationID)).
-		Set(expression.Name("groups"), expression.ListAppend(
-			expression.IfNotExists(expression.Name("groups"), expression.Value(emptyList)),
-			expression.Value([]string{group}))).
+		Add(expression.Name("groups"), expression.Value(gs)).
 		Set(expression.Name("email"), expression.Value(user.ID)).
 		Set(expression.Name("firstName"), expression.Value(user.FirstName)).
 		Set(expression.Name("lastName"), expression.Value(user.LastName)).
@@ -181,12 +222,77 @@ func (store OrganisationStore) AddUserToOrganisationGroup(organisationID string,
 	}
 	_, err = store.Client.UpdateItem(&dynamodb.UpdateItemInput{
 		TableName:                 store.TableName,
-		Key:                       idAndRng(newOrganisationGroupMemberRecordHashKey(organisationID), newOrganisationGroupMemberRecordRangeKey(user.ID)),
+		Key:                       idAndRng(newOrganisationMemberRecordHashKey(organisationID), newOrganisationMemberRecordRangeKey(user.ID)),
 		ExpressionAttributeNames:  expr.Names(),
 		ExpressionAttributeValues: expr.Values(),
 		UpdateExpression:          expr.Update(),
 	})
 	return err
+}
+
+// RemoveUserFromOrganisationGroups removes a user from a set of Organisation level groups.
+func (store OrganisationStore) RemoveUserFromOrganisationGroups(organisationID, userID string, groups ...string) error {
+	return store.RemoveUserFromGroups(organisationID, userID, groups, nil)
+}
+
+// RemoveUserFromServiceGroups removes a user from a set of Service-level groups.
+func (store OrganisationStore) RemoveUserFromServiceGroups(organisationID, userID, serviceID string, groups ...string) error {
+	return store.RemoveUserFromGroups(organisationID, userID, nil, map[string][]string{
+		serviceID: groups,
+	})
+}
+
+// RemoveUserFromGroups removes a user from Organisation and Service groups.
+func (store OrganisationStore) RemoveUserFromGroups(organisationID, userID string, groups []string, serviceIDToGroups map[string][]string) error {
+	gs := newGroupSet(groups, serviceIDToGroups)
+	update := expression.Delete(expression.Name("groups"), expression.Value(gs))
+	expr, err := expression.NewBuilder().
+		WithUpdate(update).
+		Build()
+	if err != nil {
+		return err
+	}
+	_, err = store.Client.UpdateItem(&dynamodb.UpdateItemInput{
+		TableName:                 store.TableName,
+		Key:                       idAndRng(newOrganisationMemberRecordHashKey(organisationID), newOrganisationMemberRecordRangeKey(userID)),
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		UpdateExpression:          expr.Update(),
+	})
+	return err
+}
+
+// RemoveUser from the Organisation.
+func (store OrganisationStore) RemoveUser(organisationID string, userID string) error {
+	key := idAndRng(newOrganisationMemberRecordHashKey(organisationID), newOrganisationMemberRecordRangeKey(userID))
+	_, err := store.Client.DeleteItem(&dynamodb.DeleteItemInput{
+		TableName: store.TableName,
+		Key:       key,
+	})
+	return err
+}
+
+// UpdateUserDetails updates a user's details within the Organisation.
+func (store OrganisationStore) UpdateUserDetails(organisationID, userID, firstName, lastName, phone string) error {
+	update := expression.
+		Set(expression.Name("firstName"), expression.Value(firstName)).
+		Set(expression.Name("lastName"), expression.Value(lastName)).
+		Set(expression.Name("phone"), expression.Value(phone))
+	expr, err := expression.NewBuilder().
+		WithUpdate(update).
+		Build()
+	if err != nil {
+		return err
+	}
+	_, err = store.Client.UpdateItem(&dynamodb.UpdateItemInput{
+		TableName:                 store.TableName,
+		Key:                       idAndRng(newOrganisationMemberRecordHashKey(organisationID), newOrganisationMemberRecordRangeKey(userID)),
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		UpdateExpression:          expr.Update(),
+	})
+	return err
+
 }
 
 // organisation record.
@@ -221,27 +327,27 @@ type organisationRecordFields struct {
 	OrganisationName string `json:"organisationName"`
 }
 
-// organisation group member record.
-const organisationGroupMemberRecordName = "organisationGroupMember"
+// organisation member record.
+const organisationMemberRecordName = "organisationGroupMember"
 
-func newOrganisationGroupMemberRecordHashKey(organisationID string) string {
+func newOrganisationMemberRecordHashKey(organisationID string) string {
 	return newOrganisationRecordHashKey(organisationID)
 }
 
-func newOrganisationGroupMemberRecordRangeKey(emailAddress string) string {
-	return organisationGroupMemberRecordName + "/" + emailAddress
+func newOrganisationMemberRecordRangeKey(emailAddress string) string {
+	return organisationMemberRecordName + "/" + emailAddress
 }
 
-func newOrganisationGroupMemberRecord(org Organisation, groups []string, u User) organisationGroupMemberRecord {
-	var record organisationGroupMemberRecord
-	record.ID = newOrganisationGroupMemberRecordHashKey(org.ID)
-	record.Range = newOrganisationGroupMemberRecordRangeKey(u.ID)
-	record.RecordType = organisationGroupMemberRecordName
+func newOrganisationMemberRecord(org Organisation, groups []string, serviceGroups map[string][]string, u User) organisationMemberRecord {
+	var record organisationMemberRecord
+	record.ID = newOrganisationMemberRecordHashKey(org.ID)
+	record.Range = newOrganisationMemberRecordRangeKey(u.ID)
+	record.RecordType = organisationMemberRecordName
 	record.Version = 0
 
 	record.OrganisationID = org.ID
 
-	record.Groups = groups
+	record.Groups = newGroupSet(groups, serviceGroups)
 
 	// userRecordFields
 	record.Email = u.ID
@@ -252,10 +358,10 @@ func newOrganisationGroupMemberRecord(org Organisation, groups []string, u User)
 	return record
 }
 
-type organisationGroupMemberRecord struct {
+type organisationMemberRecord struct {
 	record
-	OrganisationID string   `json:"organisationID"`
-	Groups         []string `json:"groups"`
+	OrganisationID string    `json:"organisationId"`
+	Groups         *groupSet `json:"groups"`
 	userRecordFields
 }
 
@@ -270,26 +376,19 @@ func newOrganisationServiceRecordRangeKey(serviceID string) string {
 	return organisationServiceRecordName + "/" + serviceID
 }
 
+func newOrganisationServiceRecord(organisationID, serviceID, name string) organisationServiceRecord {
+	var record organisationServiceRecord
+	record.ID = newOrganisationServiceRecordHashKey(organisationID)
+	record.Range = newOrganisationServiceRecordRangeKey(serviceID)
+	record.RecordType = organisationServiceRecordName
+	record.Version = 0
+	record.ServiceID = serviceID
+	record.ServiceName = name
+	return record
+}
+
 type organisationServiceRecord struct {
 	record
 	ServiceID   string `json:"serviceId"`
 	ServiceName string `json:"serviceName"`
-}
-
-// organisation service group record.
-const organisationServiceGroupRecordName = "organisationServiceGroup"
-
-func newOrganisationServiceGroupRecordHashKey(organisationID string) string {
-	return newOrganisationRecordHashKey(organisationID)
-}
-
-func newOrganisationServiceGroupRecordRangeKey(serviceID, group string) string {
-	return organisationServiceGroupRecordName + "/" + serviceID + "/" + group
-}
-
-type organisationServiceGroupRecord struct {
-	record
-	ServiceID string   `json:"serviceId"`
-	Group     string   `json:"group"`
-	UserIDs   []string `json:"userIds"`
 }

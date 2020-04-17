@@ -71,7 +71,7 @@ func TestUserInviteIgnore(t *testing.T) {
 	}
 
 	orgA := newOrganisation("orgA", "A")
-	err = s.Invite(u, orgA, []string{"testGroup"})
+	err = s.Invite(u, orgA, []string{"testGroup"}, nil)
 	if err != nil {
 		t.Errorf("failed to invite user to group A: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestUserInviteAccept(t *testing.T) {
 
 	// Invite user to three groups (A, B and C). Ignore A, Accept B, and Reject C.
 	orgA := newOrganisation("orgA", "A")
-	err = s.Invite(u, orgA, []string{"testGroup"})
+	err = s.Invite(u, orgA, []string{"testGroup"}, nil)
 	if err != nil {
 		t.Errorf("failed to invite user to group A: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestUserInviteReject(t *testing.T) {
 	}
 
 	orgA := newOrganisation("orgA", "A")
-	err = s.Invite(u, orgA, []string{"testGroup"})
+	err = s.Invite(u, orgA, []string{"testGroup"}, nil)
 	if err != nil {
 		t.Errorf("failed to invite user to group A: %v", err)
 	}

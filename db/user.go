@@ -100,13 +100,13 @@ func (store UserStore) GetDetails(id string) (user UserDetails, err error) {
 	return
 }
 
-// Invite a User to an Organisation.
-func (store UserStore) Invite(u User, org Organisation, groups []string) error {
+// Invite a User to an Organisation, optionally inviting to Organisation and Service groups.
+func (store UserStore) Invite(u User, org Organisation, groups []string, serviceGroups map[string][]string) error {
 	now := store.Now()
-	organisationGroupMemberRecord := newOrganisationGroupMemberRecord(org, groups, u)
-	organisationGroupMemberItem, err := dynamodbattribute.ConvertToMap(organisationGroupMemberRecord)
+	organisationMemberRecord := newOrganisationMemberRecord(org, groups, serviceGroups, u)
+	organisationGroupMemberItem, err := dynamodbattribute.ConvertToMap(organisationMemberRecord)
 	if err != nil {
-		return fmt.Errorf("userStore.Invite: failed to convert organisationGroupMemberRecord: %w", err)
+		return fmt.Errorf("userStore.Invite: failed to convert organisationMemberRecord: %w", err)
 	}
 	userOrganisationRecord := newUserOrganisationRecord(u, org, now, nil)
 	userOrganisationItem, err := dynamodbattribute.ConvertToMap(userOrganisationRecord)
@@ -135,7 +135,6 @@ func (store UserStore) Invite(u User, org Organisation, groups []string) error {
 // AcceptInvite accepts an invitation to join an Organisation.
 func (store UserStore) AcceptInvite(u User, org Organisation) error {
 	update := expression.Set(expression.Name("acceptedAt"), expression.Value(store.Now()))
-
 	expr, err := expression.NewBuilder().
 		WithUpdate(update).
 		Build()
@@ -155,8 +154,8 @@ func (store UserStore) AcceptInvite(u User, org Organisation) error {
 
 // RejectInvite rejects an invitation to join an Organisation.
 func (store UserStore) RejectInvite(u User, org Organisation) error {
-	organisationGroupMemberKey := idAndRng(newOrganisationGroupMemberRecordHashKey(org.ID),
-		newOrganisationGroupMemberRecordRangeKey(u.ID))
+	organisationGroupMemberKey := idAndRng(newOrganisationMemberRecordHashKey(org.ID),
+		newOrganisationMemberRecordRangeKey(u.ID))
 	userOrganisationRecordKey := idAndRng(newUserOrganisationRecordHashKey(u.ID),
 		newUserOrganisationRecordRangeKey(org.ID))
 	_, err := store.Client.BatchWriteItem(&dynamodb.BatchWriteItemInput{
