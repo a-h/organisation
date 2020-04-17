@@ -39,39 +39,6 @@ type User struct {
 	CreatedAt time.Time
 }
 
-func newUserDetailsFromRecords(items []map[string]*dynamodb.AttributeValue) (user UserDetails, err error) {
-	for _, item := range items {
-		recordType, ok := item["typ"]
-		if !ok || recordType.S == nil {
-			continue
-		}
-		switch *recordType.S {
-		case userRecordName:
-			err = dynamodbattribute.UnmarshalMap(item, &user)
-			if err != nil {
-				err = fmt.Errorf("newUserDetailsFromRecords: failed to convert userRecord: %w", err)
-				return
-			}
-			user.ID = *item["email"].S
-			break
-		case userOrgnisationRecordName:
-			var uor userOrganisationRecord
-			err = dynamodbattribute.UnmarshalMap(item, &uor)
-			if err != nil {
-				err = fmt.Errorf("newUserDetailsFromRecords: failed to convert userOrganisationRecord: %w", err)
-				return
-			}
-			if uor.AcceptedAt == nil {
-				user.Invitations = append(user.Invitations, newInvitationFromRecord(uor))
-				continue
-			}
-			user.Organisations = append(user.Organisations, newOrganisation(uor.OrganisationID, uor.OrganisationName))
-			break
-		}
-	}
-	return
-}
-
 // UserDetails provides all the details of a User.
 type UserDetails struct {
 	User

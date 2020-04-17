@@ -47,8 +47,8 @@ func TestUserGetIntegration(t *testing.T) {
 	if err != nil {
 		t.Errorf("failed to get user: %v", err)
 	}
-	if !cmp.Equal(expected, actual) {
-		t.Errorf(cmp.Diff(expected, actual))
+	if diff := cmp.Diff(expected, actual); diff != "" {
+		t.Error(diff)
 	}
 }
 
